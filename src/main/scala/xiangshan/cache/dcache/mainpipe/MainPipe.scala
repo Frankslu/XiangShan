@@ -944,6 +944,36 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   io.tag_write.bits.ecc := DontCare // generate ecc code in tagArray
   io.tag_write.bits.vaddr := s3_req.vaddr
 
+  class TagMetaModifyEntry extends DCacheBundle {
+    val paddr = UInt(PAddrBits.W)
+    val vaddr = UInt(VAddrBits.W)
+    val tag = UInt(tagBits.W)
+    val setidx = UInt(idxBits.W)
+    val way = UInt(nWays.W)
+    val isMiss = Bool()
+    val isInv = Bool()
+    val timeCnt = UInt(XLEN.W)
+  }
+
+  val isWriteTagMetaTable = Constantin.createRecord("isWriteTagMetaTable")
+  val tagMetaTable = ChiselDB.createTable("tagMetaModifyTable", new TagMetaModifyEntry, basicDB = true)
+  val entry = Wire(new TagMetaModifyEntry)
+  entry.timeCnt := GTimer()
+  entry.paddr := s3_req.addr
+  entry.vaddr := s3_req.vaddr
+  entry.tag := get_phy_tag(s3_req.addr)
+  entry.setidx := s3_idx
+  entry.way := s3_way_en
+  entry.isInv := new_coh === ClientStates.Nothing
+  entry.isMiss := s3_req.miss
+  tagMetaTable.log(
+    data = entry,
+    en = (io.tag_write.fire || io.meta_write.fire && entry.isInv) && isWriteTagMetaTable.orR,
+    site = "DCMP",
+    clock = clock,
+    reset = reset,
+  )
+
   io.tag_write_intend := s3_req.miss && s3_valid
   XSPerfAccumulate("fake_tag_write_intend", io.tag_write_intend && !io.tag_write.valid)
   XSPerfAccumulate("mainpipe_tag_write", io.tag_write.valid)

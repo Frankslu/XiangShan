@@ -20,8 +20,8 @@ class LoadMissEntry(implicit p: Parameters) extends DCacheBundle {
 }
 
 class LoadAccessEntry(implicit p: Parameters) extends LoadMissEntry{
-  val pred_way_num = UInt(XLEN.W)
-  val dm_way_num = UInt(XLEN.W)
+  // val pred_way_num = UInt(XLEN.W)
+  // val dm_way_num = UInt(XLEN.W)
   val real_way_num = UInt(XLEN.W)
 }
 

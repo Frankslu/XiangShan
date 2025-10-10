@@ -1390,7 +1390,7 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   val isFirstHitWrite = Constantin.createRecord(s"isFirstHitWrite$hartId")
   val tableName = s"LoadMissDB$hartId"
   val siteName = s"DcacheWrapper$hartId"
-  val loadMissTable = ChiselDB.createTable(tableName, new LoadMissEntry)
+  val loadMissTable = ChiselDB.createTable(tableName, new LoadMissEntry, basicDB = true)
   for( i <- 0 until LoadPipelineWidth){
     val loadMissEntry = Wire(new LoadMissEntry)
     val loadMissWriteEn =
@@ -1400,11 +1400,11 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
     loadMissEntry.robIdx := ldu(i).io.lsu.resp.bits.debug_robIdx
     loadMissEntry.paddr := ldu(i).io.miss_req.bits.addr
     loadMissEntry.vaddr := ldu(i).io.miss_req.bits.vaddr
-    loadMissEntry.missState := OHToUInt(Cat(Seq(
+    loadMissEntry.missState := Cat(Seq(
       ldu(i).io.miss_req.fire & ldu(i).io.miss_resp.merged,
       ldu(i).io.miss_req.fire & !ldu(i).io.miss_resp.merged,
       ldu(i).io.lsu.s2_first_hit && ldu(i).io.lsu.resp.valid
-    )))
+    ))
     loadMissTable.log(
       data = loadMissEntry,
       en = isWriteLoadMissTable.orR && loadMissWriteEn,
@@ -1415,21 +1415,29 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   }
 
   val isWriteLoadAccessTable = Constantin.createRecord(s"isWriteLoadAccessTable$hartId")
-  val loadAccessTable = ChiselDB.createTable(s"LoadAccessDB$hartId", new LoadAccessEntry)
+  class MyLoadAccessEntry extends LoadAccessEntry {
+    val setidx = UInt(idxBits.W)
+    val tag = UInt(tagBits.W)
+    val isReplayed = Bool()
+  }
+  val loadAccessTable = ChiselDB.createTable(s"LoadAccessDB$hartId", new MyLoadAccessEntry, basicDB = true)
   for (i <- 0 until LoadPipelineWidth) {
-    val loadAccessEntry = Wire(new LoadAccessEntry)
+    val loadAccessEntry = Wire(new MyLoadAccessEntry)
     loadAccessEntry.timeCnt := GTimer()
     loadAccessEntry.robIdx := ldu(i).io.lsu.resp.bits.debug_robIdx
     loadAccessEntry.paddr := ldu(i).io.miss_req.bits.addr
     loadAccessEntry.vaddr := ldu(i).io.miss_req.bits.vaddr
-    loadAccessEntry.missState := OHToUInt(Cat(Seq(
+    loadAccessEntry.missState := Cat(Seq(
       ldu(i).io.miss_req.fire & ldu(i).io.miss_resp.merged,
       ldu(i).io.miss_req.fire & !ldu(i).io.miss_resp.merged,
       ldu(i).io.lsu.s2_first_hit && ldu(i).io.lsu.resp.valid
-    )))
-    loadAccessEntry.pred_way_num := ldu(i).io.lsu.debug_s2_pred_way_num
+    ))
+    // loadAccessEntry.pred_way_num := ldu(i).io.lsu.debug_s2_pred_way_num
     loadAccessEntry.real_way_num := ldu(i).io.lsu.debug_s2_real_way_num
-    loadAccessEntry.dm_way_num := ldu(i).io.lsu.debug_s2_dm_way_num
+    // loadAccessEntry.dm_way_num := ldu(i).io.lsu.debug_s2_dm_way_num
+    loadAccessEntry.setidx := get_idx(ldu(i).io.miss_req.bits.vaddr)
+    loadAccessEntry.tag := get_phy_tag(ldu(i).io.miss_req.bits.addr)
+    loadAccessEntry.isReplayed := ldu(i).io.lsu.resp.bits.replay
     loadAccessTable.log(
       data = loadAccessEntry,
       en = isWriteLoadAccessTable.orR && ldu(i).io.lsu.resp.valid,
