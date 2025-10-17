@@ -413,7 +413,7 @@ class DCacheLineReq(implicit p: Parameters) extends DCacheBundle
     XSDebug(cond, "DCacheLineReq: cmd: %x addr: %x data: %x mask: %x id: %d\n",
       cmd, addr, data, mask, id)
   }
-  def idx: UInt = get_idx(vaddr)
+  def idx: UInt = get_dcache_idx(vaddr)
 }
 
 class DCacheWordReqWithVaddr(implicit p: Parameters) extends DCacheWordReq {
@@ -1746,11 +1746,11 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
   // ld_access.zip(ldu).foreach {
   //   case (a, u) =>
   //     a.valid := RegNext(u.io.lsu.req.fire) && !u.io.lsu.s1_kill
-  //     a.bits.idx := RegEnable(get_idx(u.io.lsu.req.bits.vaddr), u.io.lsu.req.fire)
+  //     a.bits.idx := RegEnable(get_dcache_idx(u.io.lsu.req.bits.vaddr), u.io.lsu.req.fire)
   //     a.bits.tag := get_tag(u.io.lsu.s1_paddr_dup_dcache)
   // }
   // st_access.valid := RegNext(mainPipe.io.store_req.fire)
-  // st_access.bits.idx := RegEnable(get_idx(mainPipe.io.store_req.bits.vaddr), mainPipe.io.store_req.fire)
+  // st_access.bits.idx := RegEnable(get_dcache_idx(mainPipe.io.store_req.bits.vaddr), mainPipe.io.store_req.fire)
   // st_access.bits.tag := RegEnable(get_tag(mainPipe.io.store_req.bits.addr), mainPipe.io.store_req.fire)
   // val access_info = ld_access.toSeq ++ Seq(st_access)
   // val early_replace = RegNext(missQueue.io.debug_early_replace) // TODO: clock gate
