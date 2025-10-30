@@ -79,6 +79,7 @@ class MPAccess(implicit p: Parameters) extends LduAccess {
   val repl = Bool() // if repl is true, ignore hit
   override def isHit = !repl && hit
   override def isMiss = !repl && !hit
+  def isRepl = repl
 }
 
 class ReplReq(implicit p: Parameters) extends DCacheBundle {
@@ -89,7 +90,7 @@ class ReplResp(implicit p: Parameters) extends DCacheBundle {
   val way = UInt(wayBits.W)
 }
 
-class DIP(implicit p: Parameters) extends DCacheModule {
+class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheModule {
   val n_ways = cacheParams.nWays
   val n_sets = cacheParams.nSets
   val dedicated_sets_num = 16
@@ -109,10 +110,133 @@ class DIP(implicit p: Parameters) extends DCacheModule {
     val replResp = new ReplResp
   }))
 
+  // for unit test
+  val debug = if (debug_mode) Some(IO(new Bundle {
+    val w = Flipped(new Bundle {
+      val psel = Valid(UInt(psel_bits.W))
+      val bip_cnt = Valid(UInt(bipcnt_bits.W))
+      val state = Valid(new Bundle {
+        val set = UInt(idxBits.W)
+        val value = UInt(state_bits.W)
+      })
+    })
+    val r = new Bundle {
+      val psel = UInt(psel_bits.W)
+      val bip_cnt = UInt(bipcnt_bits.W)
+      val state = new Bundle {
+        val set = Input(UInt(idxBits.W))
+        val value = UInt(state_bits.W)
+      }
+    }
+  })) else None
+
   val state_vec = if (state_bits == 0) Reg(Vec(n_sets, UInt(0.W))) else RegInit(VecInit(Seq.fill(n_sets)(0.U(state_bits.W))))
   val bip_cnt = RegInit(0.U(bipcnt_bits.W))
-  val repl_plru = new PseudoLRU(n_ways)
   val psel = RegInit(pselInit)
+
+  private val insertLRU = 1.U(1.W)
+  private val insertMRU = 0.U(1.W)
+
+  //        1
+  //      /
+  //    1       0
+  //   /         \
+  //  1   0   1   0
+  // /     \ /     \
+  // 7 6 5 4 3 2 1 0: way
+  def get_next_state(state: UInt, touch_way: UInt, insert_mode: UInt, tree_nways: Int, is_mainpipe: Option[Boolean]): UInt = {
+    require(insert_mode.getWidth == 1)
+    if (tree_nways > 2) {
+      // we are at a branching node in the tree, so recurse
+      val right_nways: Int = 1 << (log2Ceil(tree_nways) - 1)  // number of ways in the right sub-tree
+      val left_nways:  Int = tree_nways - right_nways         // number of ways in the left sub-tree
+      val msb = touch_way(log2Ceil(tree_nways)-1)
+      val access_right        = !msb
+      val set_left_older      = is_mainpipe match {
+        case Some(true) => Mux(insert_mode === insertMRU, !msb, msb)
+        case None | Some(false) => !msb
+      }
+      val left_subtree_state  = state.extract(tree_nways-3, right_nways-1)
+      val right_subtree_state = state(right_nways-2, 0)
+
+      if (left_nways > 1) {
+        // we are at a branching node in the tree with both left and right sub-trees, so recurse both sub-trees
+        Cat(set_left_older,
+            Mux(access_right,
+                left_subtree_state,  // if setting left sub-tree as older, do NOT recurse into left sub-tree
+                get_next_state(left_subtree_state, touch_way.extract(log2Ceil(left_nways)-1,0), insert_mode, left_nways, is_mainpipe)),  // recurse left if newer
+            Mux(access_right,
+                get_next_state(right_subtree_state, touch_way(log2Ceil(right_nways)-1,0), insert_mode, right_nways, is_mainpipe),  // recurse right if newer
+                right_subtree_state))  // if setting right sub-tree as older, do NOT recurse into right sub-tree
+      } else {
+        // we are at a branching node in the tree with only a right sub-tree, so recurse only right sub-tree
+        assert(false, "unchecked path")
+        Cat(set_left_older,
+            Mux(access_right,
+                get_next_state(right_subtree_state, touch_way(log2Ceil(right_nways)-1,0), insert_mode, right_nways, is_mainpipe),  // recurse right if newer
+                right_subtree_state))  // if setting right sub-tree as older, do NOT recurse into right sub-tree
+      }
+    } else if (tree_nways == 2) {
+      // we are at a leaf node at the end of the tree, so set the single state bit opposite of the lsb of the touched way encoded value
+      is_mainpipe match {
+        case Some(true) => Mux(insert_mode === insertMRU, !touch_way(0), touch_way(0))
+        case None | Some(false) => !touch_way(0)
+      }
+      // Mux(insert_mode === insertMRU, touch_way(0), !touch_way(0))
+    } else {  // tree_nways <= 1
+      // we are at an empty node in an empty tree for 1 way, so return single zero bit for Chisel (no zero-width wires)
+      0.U(1.W)
+    }
+  }
+
+  def get_next_state(state: UInt, touch_way: UInt, insert_mode: UInt, is_mainpipe: Option[Boolean] = None): UInt = {
+    val touch_way_sized = if (touch_way.getWidth < log2Ceil(n_ways)) touch_way.padTo  (log2Ceil(n_ways))
+                                                                else touch_way.extract(log2Ceil(n_ways)-1,0)
+    get_next_state(state, touch_way_sized, insert_mode, n_ways, is_mainpipe)
+  }
+
+  def get_next_state(state: UInt, valids: Seq[Bool], touch_ways: Seq[UInt], insert_modes: Seq[UInt], is_mainpipes: Seq[Option[Boolean]]): UInt = {
+    (valids zip touch_ways zip insert_modes zip is_mainpipes).foldLeft(state) {
+      case(prev, (((valid, touch_way), insert_mode), is_mainpipe)) =>
+        Mux(valid, get_next_state(prev, touch_way, insert_mode, is_mainpipe), prev)
+    }
+  }
+
+  def get_replace_way(state: UInt, tree_nways: Int): UInt = {
+    require(state.getWidth == (tree_nways-1), s"wrong state bits width ${state.getWidth} for $tree_nways ways")
+
+    // this algorithm recursively descends the binary tree, filling in the way-to-replace encoded value from msb to lsb
+    if (tree_nways > 2) {
+      // we are at a branching node in the tree, so recurse
+      val right_nways: Int = 1 << (log2Ceil(tree_nways) - 1)  // number of ways in the right sub-tree
+      val left_nways:  Int = tree_nways - right_nways         // number of ways in the left sub-tree
+      val left_subtree_older  = state(tree_nways-2)
+      val left_subtree_state  = state.extract(tree_nways-3, right_nways-1)
+      val right_subtree_state = state(right_nways-2, 0)
+
+      if (left_nways > 1) {
+        // we are at a branching node in the tree with both left and right sub-trees, so recurse both sub-trees
+        Cat(left_subtree_older,      // return the top state bit (current tree node) as msb of the way-to-replace encoded value
+            Mux(left_subtree_older,  // if left sub-tree is older, recurse left, else recurse right
+                get_replace_way(left_subtree_state,  left_nways),    // recurse left
+                get_replace_way(right_subtree_state, right_nways)))  // recurse right
+      } else {
+        // we are at a branching node in the tree with only a right sub-tree, so recurse only right sub-tree
+        Cat(left_subtree_older,      // return the top state bit (current tree node) as msb of the way-to-replace encoded value
+            Mux(left_subtree_older,  // if left sub-tree is older, return and do not recurse right
+                0.U(1.W),
+                get_replace_way(right_subtree_state, right_nways)))  // recurse right
+      }
+    } else if (tree_nways == 2) {
+      // we are at a leaf node at the end of the tree, so just return the single state bit as lsb of the way-to-replace encoded value
+      state(0)
+    } else {  // tree_nways <= 1
+      // we are at an empty node in an unbalanced tree for non-power-of-2 ways, so return single zero bit as lsb of the way-to-replace encoded value
+      0.U(1.W)
+    }
+  }
+
+  def get_replace_way(state: UInt): UInt = get_replace_way(state, n_ways)
 
   def match_a(set: UInt) = {
     val set_bits = set.getWidth
@@ -143,31 +267,31 @@ class DIP(implicit p: Parameters) extends DCacheModule {
       val set = setidx.U(idxBits.W)
       val updateState = in.lduAccess.map(a => a.valid && a.bits.set === set).asUInt.orR || in.mpAccess.valid
       val touchWaysSeq = in.lduAccess.map {a =>
-        val touch_ways = Wire(Valid(UInt(wayBits.W)))
-        touch_ways.valid := a.valid && a.bits.hit && a.bits.set === set
-        touch_ways.bits := a.bits.way
-        touch_ways
+        val valid = a.valid && a.bits.hit && a.bits.set === set
+        val touchWay = a.bits.way
+        val insertMode = insertLRU
+        (valid, touchWay, insertMode, Some(false))
       } ++ Seq {
         val mpAccess = in.mpAccess.bits
-        val touch_way = Wire(Valid(UInt(wayBits.W)))
-        touch_way.valid := in.mpAccess.valid && in.mpAccess.bits.set === set && Mux(mpAccess.repl,
-          match_a(set) || match_b(set) && bip_cnt === 0.U || follower(set) && (use_a || use_b && bip_cnt === 0.U),
-          mpAccess.hit)
-        touch_way.bits := in.mpAccess.bits.way
-        touch_way
+        val valid = in.mpAccess.valid && in.mpAccess.bits.set === set && (mpAccess.isRepl || mpAccess.isHit)
+        val touchWay = in.mpAccess.bits.way
+        val isInsertMru = mpAccess.isHit || mpAccess.isRepl && 
+          (match_a(set) || match_b(set) && bip_cnt === 0.U || follower(set) && (use_a || use_b && bip_cnt === 0.U))
+        val insertMode = Mux(isInsertMru, insertMRU, insertLRU)
+        (valid, touchWay, insertMode, Some(true))
       }
       when (updateState) {
-        state := repl_plru.get_next_state(state, touchWaysSeq)
+        state := get_next_state(state, touchWaysSeq.map(_._1), touchWaysSeq.map(_._2), touchWaysSeq.map(_._3), touchWaysSeq.map(_._4))
       }
   }
 
   val accesses = in.lduAccess ++ Seq(in.mpAccess)
   val aMiss = PopCount(VecInit(accesses.map {
-    case a => a.valid && match_a(a.bits.set) && a.bits.isMiss
+    case access => access.valid && match_a(access.bits.set) && access.bits.isMiss
   }))
 
   val bMiss = PopCount(VecInit(accesses.map {
-    case a => a.valid && match_b(a.bits.set) && a.bits.isMiss
+    case access => access.valid && match_b(access.bits.set) && access.bits.isMiss
   }))
 
   val pselUpd = psel + aMiss - bMiss
@@ -180,9 +304,26 @@ class DIP(implicit p: Parameters) extends DCacheModule {
     ))
   }
 
-  out.replResp.way := repl_plru.get_replace_way(state_vec(in.replReq.bits.set))
+  out.replResp.way := get_replace_way(state_vec(in.replReq.bits.set))
   val mpAccessSet = in.mpAccess.bits.set
   when (in.mpAccess.valid && in.mpAccess.bits.repl && (match_b(mpAccessSet) || follower(mpAccessSet) && use_b)) {
     bip_cnt := bip_cnt + 1.U
+  }
+
+  debug.foreach {
+    case io =>
+      io.r.bip_cnt := bip_cnt
+      io.r.psel := psel
+      io.r.state.value := state_vec(io.r.state.set)
+
+      when (io.w.bip_cnt.valid) {
+        bip_cnt := io.w.bip_cnt.bits
+      }
+      when (io.w.psel.valid) {
+        psel := io.w.psel.bits
+      }
+      when (io.w.state.valid) {
+        state_vec(io.w.state.bits.set) := io.w.state.bits.value
+      }
   }
 }
