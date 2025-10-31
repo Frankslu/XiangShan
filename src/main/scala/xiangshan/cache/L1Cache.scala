@@ -77,7 +77,7 @@ trait HasL1CacheParameters extends HasXSParameter
   // the number of words in a block
   def blockWords = blockBytes / wordBytes
   def refillWords = refillBytes / wordBytes
-  def modeId = 1 //DCache index & alias mode: 1 for hash vaddr, 2 for direct extract vaddr[13:6]
+  def modeId = 2 //DCache index & alias mode: 1 for hash vaddr, 2 for direct extract vaddr[13:6]
   def hashBitPairs(addr: UInt, hi: Int = PAddrBits - 1, lo: Int = pgIdxBits, step: Int = 2): UInt = {
     require(hi > lo && (hi - lo + 1) % step == 0, "Invalid bit range or step")
     (lo to hi by step).map(i => addr(i + step - 1, i)).reduce(_ ^ _)

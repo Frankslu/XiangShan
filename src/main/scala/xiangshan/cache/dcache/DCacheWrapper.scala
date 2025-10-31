@@ -33,6 +33,8 @@ import xiangshan.backend.rob.{RobDebugRollingIO, RobPtr}
 import xiangshan.cache.wpu._
 import xiangshan.mem.{AddPipelineReg, DataBufferEntry, HasL1PrefetchSourceParameter, LqPtr}
 import xiangshan.mem.prefetch._
+import xiangshan.cache.dcache.DIP
+import xiangshan.cache.dcache.LduAccess
 
 // DCache specific parameters
 case class DCacheParameters
@@ -362,6 +364,7 @@ abstract class DCacheBundle(implicit p: Parameters) extends L1CacheBundle
 class ReplacementAccessBundle(implicit p: Parameters) extends DCacheBundle {
   val set = UInt(log2Up(nSets).W)
   val way = UInt(log2Up(nWays).W)
+  val hit = Bool()
 }
 
 class ReplacementWayReqIO(implicit p: Parameters) extends DCacheBundle {
@@ -1672,44 +1675,58 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
 
   //----------------------------------------
   // replacement algorithm
-  val replacer = ReplacementPolicy.fromString(cacheParams.replacer, nWays, nSets)
-  val replWayReqs = ldu.map(_.io.replace_way) ++ Seq(mainPipe.io.replace_way) ++ stu.map(_.io.replace_way)
-
-  if (dwpuParam.enCfPred) {
-    val victimList = VictimList(nSets)
-    replWayReqs.foreach {
-      case req =>
-        req.way := DontCare
-        when(req.set.valid) {
-          when(victimList.whether_sa(req.set.bits)) {
-            req.way := replacer.way(req.set.bits)
-          }.otherwise {
-            req.way := req.dmWay
-          }
-        }
+  if (cacheParams.replacer.getOrElse("None").toLowerCase == "setdip") {
+    val replacer = Module(new DIP())
+    (replacer.in.lduAccess zip ldu).map {
+      case (lduAccess, ldu) =>
+        lduAccess := ldu.io.replace_access
+        ldu.io.replace_way.way := DontCare
     }
+    stu.map(_.io.replace_way.way := DontCare)
+    replacer.in.mpAccess := mainPipe.io.replace_access
+    replacer.in.replReq.valid := true.B
+    replacer.in.replReq.bits.set := mainPipe.io.replace_way.set.bits
+    mainPipe.io.replace_way.way := replacer.out.replResp.way
+  } else if (cacheParams.replacer.getOrElse("None").toLowerCase == "setdrrip") {
   } else {
-    replWayReqs.foreach {
-      case req =>
-        req.way := DontCare
-        when(req.set.valid) {
-          req.way := replacer.way(req.set.bits)
-        }
+    val replacer = ReplacementPolicy.fromString(cacheParams.replacer, nWays, nSets)
+    val replWayReqs = ldu.map(_.io.replace_way) ++ Seq(mainPipe.io.replace_way) ++ stu.map(_.io.replace_way)
+
+    if (dwpuParam.enCfPred) {
+      val victimList = VictimList(nSets)
+      replWayReqs.foreach {
+        case req =>
+          req.way := DontCare
+          when(req.set.valid) {
+            when(victimList.whether_sa(req.set.bits)) {
+              req.way := replacer.way(req.set.bits)
+            }.otherwise {
+              req.way := req.dmWay
+            }
+          }
+      }
+    } else {
+      replWayReqs.foreach {
+        case req =>
+          req.way := DontCare
+          when(req.set.valid) {
+            req.way := replacer.way(req.set.bits)
+          }
+      }
     }
-  }
 
-  val replAccessReqs = ldu.map(_.io.replace_access) ++ Seq(
-    mainPipe.io.replace_access
-  ) ++ stu.map(_.io.replace_access)
-  val touchWays = Seq.fill(replAccessReqs.size)(Wire(ValidIO(UInt(log2Up(nWays).W))))
-  touchWays.zip(replAccessReqs).foreach {
-    case (w, req) =>
-      w.valid := req.valid
-      w.bits := req.bits.way
+    val replAccessReqs = ldu.map(_.io.replace_access) ++ Seq(
+      mainPipe.io.replace_access
+    ) ++ stu.map(_.io.replace_access)
+    val touchWays = Seq.fill(replAccessReqs.size)(Wire(ValidIO(UInt(log2Up(nWays).W))))
+    touchWays.zip(replAccessReqs).foreach {
+      case (w, req) =>
+        w.valid := req.valid
+        w.bits := req.bits.way
+    }
+    val touchSets = replAccessReqs.map(_.bits.set)
+    replacer.access(touchSets, touchWays)
   }
-  val touchSets = replAccessReqs.map(_.bits.set)
-  replacer.access(touchSets, touchWays)
-
   //----------------------------------------
   // assertions
   // dcache should only deal with DRAM addresses

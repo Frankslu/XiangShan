@@ -22,6 +22,7 @@ import chisel3.util._
 import freechips.rocketchip.tilelink.ClientMetadata
 import utility.{XSDebug, XSPerfAccumulate, HasPerfEvents}
 import xiangshan.L1CacheErrorInfo
+import xiangshan.cache.dcache.LduAccess
 
 class DcacheStoreRequestIO(implicit p: Parameters) extends DCacheBundle {
   val cmd = UInt(M_SZ.W)
@@ -74,7 +75,7 @@ class StorePipe(id: Int)(implicit p: Parameters) extends DCacheModule{
     val miss_req = DecoupledIO(new MissReq)
 
     // update state vec in replacement algo, for now, set this as false
-    val replace_access = ValidIO(new ReplacementAccessBundle)
+    val replace_access = ValidIO(new LduAccess)
     // find the way to be replaced
     val replace_way = new ReplacementWayReqIO
 

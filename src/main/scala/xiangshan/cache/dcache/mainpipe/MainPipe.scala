@@ -28,6 +28,7 @@ import utility._
 import xiangshan.{L1CacheErrorInfo, XSCoreParamsKey}
 import xiangshan.mem.prefetch._
 import xiangshan.mem.HasL1PrefetchSourceParameter
+import xiangshan.cache.dcache.MPAccess
 
 class MainPipeReq(implicit p: Parameters) extends DCacheBundle {
   val miss = Bool() // only amo miss will refill in main pipe
@@ -175,9 +176,10 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
     val tag_write_intend = Output(new Bool())
 
     // update state vec in replacement algo
-    val replace_access = ValidIO(new ReplacementAccessBundle)
+    val replace_access = ValidIO(new MPAccess)
     // find the way to be replaced
     val replace_way = new ReplacementWayReqIO
+    // val replace_way = new ReplacementWayReqIO
 
     val evict_set = Output(UInt())
     val btot_ways_for_set = Input(UInt(nWays.W))
@@ -1000,10 +1002,35 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   io.wb.bits.delay_release := s3_req.replace
   io.wb.bits.miss_id := s3_req.miss_id
 
+  // miss req may not pass to s3, so add this reg to pass miss info to s3 to update replacer
+  // only need to pass miss and idx bacause no way accessed in miss
+  val s3_miss_replace_access = RegInit(0.U.asTypeOf(Valid(new Bundle {
+    val miss = Bool()
+    val repl = Bool()
+    val idx = UInt(idxBits.W)
+  })))
   // update plru in main pipe s3
-  io.replace_access.valid := GatedValidRegNext(s2_fire_to_s3) && !s3_req.probe && (s3_req.miss || ((s3_req.isAMO || s3_req.isStore) && s3_hit))
-  io.replace_access.bits.set := s3_idx
+  val s2_repl_access_cango = (s2_sc || s2_req.replace || s2_req.probe ||
+    Mux(
+      s2_req.miss,
+      io.refill_info.valid && !s2_replace_block,
+      s2_req.isStore || s2_req.isAMO
+    )
+  ) && s3_ready
+  val s2_repl_access_fire = s2_repl_access_cango && s2_valid
+  when (s2_repl_access_fire) {
+    s3_miss_replace_access.valid := true.B
+    s3_miss_replace_access.bits.idx := s2_idx
+    s3_miss_replace_access.bits.miss := !s2_hit
+    s3_miss_replace_access.bits.repl := s2_req.miss
+  }.elsewhen (s3_fire) {
+    s3_miss_replace_access.valid := false.B
+  }
+  io.replace_access.valid := GatedValidRegNext(s2_fire_to_s3) && !s3_req.probe && (s3_req.miss || ((s3_req.isAMO || s3_req.isStore)))
+  io.replace_access.bits.set := s3_miss_replace_access.bits.idx
   io.replace_access.bits.way := OHToUInt(s3_way_en)
+  io.replace_access.bits.hit := !s3_miss_replace_access.bits.miss
+  io.replace_access.bits.repl := s3_miss_replace_access.bits.repl
 
   io.replace_way.set.valid := GatedValidRegNext(s0_fire)
   io.replace_way.set.bits := s1_idx

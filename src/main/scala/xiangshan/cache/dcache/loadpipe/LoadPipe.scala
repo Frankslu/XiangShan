@@ -26,6 +26,7 @@ import xiangshan.cache.wpu._
 import xiangshan.mem.HasL1PrefetchSourceParameter
 import xiangshan.mem.prefetch._
 import xiangshan.mem.LqPtr
+import xiangshan.cache.dcache.LduAccess
 
 class LoadPfDbBundle(implicit p: Parameters) extends DCacheBundle {
   val paddr = UInt(PAddrBits.W)
@@ -70,7 +71,7 @@ class LoadPipe(id: Int)(implicit p: Parameters) extends DCacheModule with HasPer
     val wbq_block_miss_req = Input(Bool())
 
     // update state vec in replacement algo
-    val replace_access = ValidIO(new ReplacementAccessBundle)
+    val replace_access = ValidIO(new LduAccess)
     // find the way to be replaced
     val replace_way = new ReplacementWayReqIO
 
@@ -566,9 +567,10 @@ class LoadPipe(id: Int)(implicit p: Parameters) extends DCacheModule with HasPer
   // report tag error / l2 corrupted to CACHE_ERROR csr
   io.error.valid := s3_error && s3_valid
 
-  io.replace_access.valid := s3_valid && s3_hit
+  io.replace_access.valid := s3_valid
   io.replace_access.bits.set := RegNext(RegNext(get_dcache_idx(s1_req.vaddr)))
   io.replace_access.bits.way := RegNext(RegNext(OHToUInt(s1_tag_match_way_dup_dc)))
+  io.replace_access.bits.hit := s3_hit
 
   // update access bit
   io.access_flag_write.valid := s3_valid && s3_hit && !s3_is_prefetch
