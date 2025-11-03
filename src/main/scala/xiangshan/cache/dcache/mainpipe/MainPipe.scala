@@ -1004,11 +1004,11 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
 
   // miss req may not pass to s3, so add this reg to pass miss info to s3 to update replacer
   // only need to pass miss and idx bacause no way accessed in miss
-  val s3_miss_replace_access = RegInit(0.U.asTypeOf(Valid(new Bundle {
+  val s3_miss_replace_access = RegInit(0.U.asTypeOf(new Bundle {
     val miss = Bool()
     val repl = Bool()
     val idx = UInt(idxBits.W)
-  })))
+  }))
   // update plru in main pipe s3
   val s2_repl_access_cango = (s2_sc || s2_req.replace || s2_req.probe ||
     Mux(
@@ -1019,18 +1019,15 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
   ) && s3_ready
   val s2_repl_access_fire = s2_repl_access_cango && s2_valid
   when (s2_repl_access_fire) {
-    s3_miss_replace_access.valid := true.B
-    s3_miss_replace_access.bits.idx := s2_idx
-    s3_miss_replace_access.bits.miss := !s2_hit
-    s3_miss_replace_access.bits.repl := s2_req.miss
-  }.elsewhen (s3_fire) {
-    s3_miss_replace_access.valid := false.B
+    s3_miss_replace_access.idx := s2_idx
+    s3_miss_replace_access.miss := !s2_hit
+    s3_miss_replace_access.repl := s2_req.miss
   }
-  io.replace_access.valid := GatedValidRegNext(s2_fire_to_s3) && !s3_req.probe && (s3_req.miss || ((s3_req.isAMO || s3_req.isStore)))
-  io.replace_access.bits.set := s3_miss_replace_access.bits.idx
+  io.replace_access.valid := GatedValidRegNext(s2_repl_access_fire) && !s3_req.probe && (s3_req.miss || ((s3_req.isAMO || s3_req.isStore)))
+  io.replace_access.bits.set := s3_miss_replace_access.idx
   io.replace_access.bits.way := OHToUInt(s3_way_en)
-  io.replace_access.bits.hit := !s3_miss_replace_access.bits.miss
-  io.replace_access.bits.repl := s3_miss_replace_access.bits.repl
+  io.replace_access.bits.hit := !s3_miss_replace_access.miss
+  io.replace_access.bits.repl := s3_miss_replace_access.repl
 
   io.replace_way.set.valid := GatedValidRegNext(s0_fire)
   io.replace_way.set.bits := s1_idx
