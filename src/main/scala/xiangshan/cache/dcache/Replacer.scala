@@ -10,6 +10,7 @@ import xiangshan.cache.DCacheModule
 import xiangshan.cache.DCacheBundle
 import xiangshan.CSROpType.seti
 import freechips.rocketchip.regmapper.RRTest0Map.de
+import utility.XSPerfAccumulate
 
 // class setBIP(n_sets: Int, n_ways: Int) {
 //   def nBits = n_ways - 1
@@ -97,7 +98,7 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
   val state_bits = n_ways - 1
   val psel_bits = 10
   val bipcnt_bits = 5
-  val pselInit = (1 << (psel_bits - 1)).U(psel_bits.W)
+  val pselInit = ((1 << (psel_bits - 1)) - 1).U(psel_bits.W)
   val pselMax = ~(0.U(psel_bits.W))
 
   val in = IO(Input(new Bundle {
@@ -326,4 +327,15 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
         state_vec(io.w.state.bits.set) := io.w.state.bits.value
       }
   }
+
+  val debug_repl_use_a = {
+    val mpAccess = in.mpAccess.bits
+    in.mpAccess.valid && mpAccess.isRepl && (match_a(mpAccess.set) || follower(mpAccess.set) && use_a)
+  }
+  val debug_repl_use_b = {
+    val mpAccess = in.mpAccess.bits
+    in.mpAccess.valid && mpAccess.isRepl && (match_b(mpAccess.set) || follower(mpAccess.set) && use_b)
+  }
+  XSPerfAccumulate("repl_use_a", debug_repl_use_a)
+  XSPerfAccumulate("repl_use_b", debug_repl_use_b)
 }
