@@ -33,7 +33,7 @@ import xiangshan.backend.rob.{RobDebugRollingIO, RobPtr}
 import xiangshan.cache.wpu._
 import xiangshan.mem.{AddPipelineReg, DataBufferEntry, HasL1PrefetchSourceParameter, LqPtr}
 import xiangshan.mem.prefetch._
-import xiangshan.cache.dcache.DIP
+import xiangshan.cache.dcache.{DIP, DRRIP}
 import xiangshan.cache.dcache.LduAccess
 
 // DCache specific parameters
@@ -1688,6 +1688,17 @@ class DCacheImp(outer: DCache) extends LazyModuleImp(outer) with HasDCacheParame
     replacer.in.replReq.bits.set := mainPipe.io.replace_way.set.bits
     mainPipe.io.replace_way.way := replacer.out.replResp.way
   } else if (cacheParams.replacer.getOrElse("None").toLowerCase == "setdrrip") {
+    val replacer = Module(new DRRIP())
+    (replacer.in.lduAccess zip ldu).map {
+      case (lduAccess, ldu) =>
+        lduAccess := ldu.io.replace_access
+        ldu.io.replace_way.way := DontCare
+    }
+    stu.map(_.io.replace_way.way := DontCare)
+    replacer.in.mpAccess := mainPipe.io.replace_access
+    replacer.in.replReq.valid := true.B
+    replacer.in.replReq.bits.set := mainPipe.io.replace_way.set.bits
+    mainPipe.io.replace_way.way := replacer.out.replResp.way
   } else {
     val replacer = ReplacementPolicy.fromString(cacheParams.replacer, nWays, nSets)
     val replWayReqs = ldu.map(_.io.replace_way) ++ Seq(mainPipe.io.replace_way) ++ stu.map(_.io.replace_way)

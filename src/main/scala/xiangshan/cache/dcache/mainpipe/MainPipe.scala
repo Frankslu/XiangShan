@@ -1008,6 +1008,7 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
     val miss = Bool()
     val repl = Bool()
     val idx = UInt(idxBits.W)
+    val source = UInt(sourceTypeWidth.W)
   }))
   // update plru in main pipe s3
   val s2_repl_access_cango = (s2_sc || s2_req.replace || s2_req.probe ||
@@ -1022,12 +1023,15 @@ class MainPipe(implicit p: Parameters) extends DCacheModule with HasPerfEvents w
     s3_miss_replace_access.idx := s2_idx
     s3_miss_replace_access.miss := !s2_hit
     s3_miss_replace_access.repl := s2_req.miss
+    s3_miss_replace_access.source := s2_req.source
   }
   io.replace_access.valid := GatedValidRegNext(s2_repl_access_fire) && !s3_req.probe && (s3_req.miss || ((s3_req.isAMO || s3_req.isStore)))
   io.replace_access.bits.set := s3_miss_replace_access.idx
   io.replace_access.bits.way := OHToUInt(s3_way_en)
   io.replace_access.bits.hit := !s3_miss_replace_access.miss
   io.replace_access.bits.repl := s3_miss_replace_access.repl
+  io.replace_access.bits.hwPft := s3_miss_replace_access.source === DCACHE_PREFETCH_SOURCE.U
+  io.replace_access.bits.softPft := s3_miss_replace_access.source === SOFT_PREFETCH.U
 
   io.replace_way.set.valid := GatedValidRegNext(s0_fire)
   io.replace_way.set.bits := s1_idx

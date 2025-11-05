@@ -571,6 +571,8 @@ class LoadPipe(id: Int)(implicit p: Parameters) extends DCacheModule with HasPer
   io.replace_access.bits.set := RegNext(RegNext(get_dcache_idx(s1_req.vaddr)))
   io.replace_access.bits.way := RegNext(RegNext(OHToUInt(s1_tag_match_way_dup_dc)))
   io.replace_access.bits.hit := s3_hit
+  io.replace_access.bits.hwPft := RegNext(RegNext(s1_req.instrtype === DCACHE_PREFETCH_SOURCE.U))
+  io.replace_access.bits.softPft := RegNext(RegNext(s1_req.instrtype === SOFT_PREFETCH.U))
 
   // update access bit
   io.access_flag_write.valid := s3_valid && s3_hit && !s3_is_prefetch
