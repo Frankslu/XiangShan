@@ -266,11 +266,11 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
   state_vec.zipWithIndex.foreach {
     case (state, setidx) =>
       val set = setidx.U(idxBits.W)
-      val updateState = in.lduAccess.map(a => a.valid && a.bits.set === set).asUInt.orR || in.mpAccess.valid
+      val updateState = in.lduAccess.map(a => a.valid && a.bits.set === set).asUInt.orR || in.mpAccess.valid && in.mpAccess.bits.set === set
       val touchWaysSeq = in.lduAccess.map {a =>
         val valid = a.valid && a.bits.hit && a.bits.set === set
         val touchWay = a.bits.way
-        val insertMode = insertLRU
+        val insertMode = insertMRU
         (valid, touchWay, insertMode, Some(false))
       } ++ Seq {
         val mpAccess = in.mpAccess.bits
@@ -336,6 +336,35 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
     val mpAccess = in.mpAccess.bits
     in.mpAccess.valid && mpAccess.isRepl && (match_b(mpAccess.set) || follower(mpAccess.set) && use_b)
   }
+  val access_a_sdm = PopCount(
+    in.lduAccess.map (a => a.valid && match_a(a.bits.set)) ++
+    Seq(in.mpAccess.valid && match_a(in.mpAccess.bits.set)))
+  val access_b_sdm = PopCount(
+    in.lduAccess.map (b => b.valid && match_b(b.bits.set)) ++
+    Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set)))
+  val access_normal_sdm = PopCount(
+    in.lduAccess.map (b => b.valid && follower(b.bits.set)) ++
+    Seq(in.mpAccess.valid && follower(in.mpAccess.bits.set)))
+  val a_sdm_hit = PopCount(
+    in.lduAccess.map (a => a.valid && match_a(a.bits.set) && a.bits.isHit) ++
+    Seq(in.mpAccess.valid && match_a(in.mpAccess.bits.set) && in.mpAccess.bits.isHit))
+  val b_sdm_hit = PopCount(
+    in.lduAccess.map (b => b.valid && match_b(b.bits.set) && b.bits.isHit) ++
+    Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set) && in.mpAccess.bits.isHit))
+  val a_sdm_miss = PopCount(
+    in.lduAccess.map (a => a.valid && match_b(a.bits.set) && a.bits.isMiss) ++
+    Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set) && in.mpAccess.bits.isMiss))
+  val b_sdm_miss = PopCount(
+    in.lduAccess.map (b => b.valid && match_b(b.bits.set) && b.bits.isHit) ++
+    Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set) && in.mpAccess.bits.isHit))
+
   XSPerfAccumulate("repl_use_a", debug_repl_use_a)
   XSPerfAccumulate("repl_use_b", debug_repl_use_b)
+  XSPerfAccumulate("access_a_sdm", access_a_sdm)
+  XSPerfAccumulate("access_b_sdm", access_b_sdm)
+  XSPerfAccumulate("access_normal_sdm", access_normal_sdm)
+  XSPerfAccumulate("a_hit", a_sdm_hit)
+  XSPerfAccumulate("b_hit", b_sdm_hit)
+  XSPerfAccumulate("a_miss", a_sdm_miss)
+  XSPerfAccumulate("b_miss", b_sdm_miss)
 }
