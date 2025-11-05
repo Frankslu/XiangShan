@@ -72,8 +72,11 @@ class LduAccess(implicit p: Parameters) extends DCacheBundle {
   val set = UInt(idxBits.W)
   val way = UInt(wayBits.W)
   val hit = Bool()
+  val hwPft = Bool()
+  val softPft = Bool()
   def isHit = hit
   def isMiss = !hit
+  def nonPft = !hwPft && !softPft
 }
 
 class MPAccess(implicit p: Parameters) extends LduAccess {
@@ -283,6 +286,245 @@ class DIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheMod
       }
       when (updateState) {
         state := get_next_state(state, touchWaysSeq.map(_._1), touchWaysSeq.map(_._2), touchWaysSeq.map(_._3), touchWaysSeq.map(_._4))
+      }
+  }
+
+  val accesses = in.lduAccess ++ Seq(in.mpAccess)
+  val aMiss = PopCount(VecInit(accesses.map {
+    case access => access.valid && match_a(access.bits.set) && access.bits.isMiss
+  }))
+
+  val bMiss = PopCount(VecInit(accesses.map {
+    case access => access.valid && match_b(access.bits.set) && access.bits.isMiss
+  }))
+
+  val pselUpd = psel + aMiss - bMiss
+
+  // another way is only add aMiss when too small or only sub bMiss when too large
+  when (accesses.map(_.valid).asUInt.orR) {
+    psel := MuxCase(pselUpd, Seq(
+      (pselUpd < pselInit && psel > pselInit) -> pselMax,
+      (pselUpd > pselInit && psel < pselInit) -> 0.U
+    ))
+  }
+
+  out.replResp.way := get_replace_way(state_vec(in.replReq.bits.set))
+  val mpAccessSet = in.mpAccess.bits.set
+  when (in.mpAccess.valid && in.mpAccess.bits.repl && (match_b(mpAccessSet) || follower(mpAccessSet) && use_b)) {
+    bip_cnt := bip_cnt + 1.U
+  }
+
+  debug.foreach {
+    case io =>
+      io.r.bip_cnt := bip_cnt
+      io.r.psel := psel
+      io.r.state.value := state_vec(io.r.state.set)
+
+      when (io.w.bip_cnt.valid) {
+        bip_cnt := io.w.bip_cnt.bits
+      }
+      when (io.w.psel.valid) {
+        psel := io.w.psel.bits
+      }
+      when (io.w.state.valid) {
+        state_vec(io.w.state.bits.set) := io.w.state.bits.value
+      }
+  }
+
+  val debug_repl_use_a = {
+    val mpAccess = in.mpAccess.bits
+    in.mpAccess.valid && mpAccess.isRepl && (match_a(mpAccess.set) || follower(mpAccess.set) && use_a)
+  }
+  val debug_repl_use_b = {
+    val mpAccess = in.mpAccess.bits
+    in.mpAccess.valid && mpAccess.isRepl && (match_b(mpAccess.set) || follower(mpAccess.set) && use_b)
+  }
+  val access_a_sdm = PopCount(
+    in.lduAccess.map (a => a.valid && match_a(a.bits.set)) ++
+    Seq(in.mpAccess.valid && match_a(in.mpAccess.bits.set)))
+  val access_b_sdm = PopCount(
+    in.lduAccess.map (b => b.valid && match_b(b.bits.set)) ++
+    Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set)))
+  val access_normal_sdm = PopCount(
+    in.lduAccess.map (b => b.valid && follower(b.bits.set)) ++
+    Seq(in.mpAccess.valid && follower(in.mpAccess.bits.set)))
+  val a_sdm_hit = PopCount(
+    in.lduAccess.map (a => a.valid && match_a(a.bits.set) && a.bits.isHit) ++
+    Seq(in.mpAccess.valid && match_a(in.mpAccess.bits.set) && in.mpAccess.bits.isHit))
+  val b_sdm_hit = PopCount(
+    in.lduAccess.map (b => b.valid && match_b(b.bits.set) && b.bits.isHit) ++
+    Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set) && in.mpAccess.bits.isHit))
+  val a_sdm_miss = PopCount(
+    in.lduAccess.map (a => a.valid && match_b(a.bits.set) && a.bits.isMiss) ++
+    Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set) && in.mpAccess.bits.isMiss))
+  val b_sdm_miss = PopCount(
+    in.lduAccess.map (b => b.valid && match_b(b.bits.set) && b.bits.isHit) ++
+    Seq(in.mpAccess.valid && match_b(in.mpAccess.bits.set) && in.mpAccess.bits.isHit))
+
+  XSPerfAccumulate("repl_use_a", debug_repl_use_a)
+  XSPerfAccumulate("repl_use_b", debug_repl_use_b)
+  XSPerfAccumulate("access_a_sdm", access_a_sdm)
+  XSPerfAccumulate("access_b_sdm", access_b_sdm)
+  XSPerfAccumulate("access_normal_sdm", access_normal_sdm)
+  XSPerfAccumulate("a_hit", a_sdm_hit)
+  XSPerfAccumulate("b_hit", b_sdm_hit)
+  XSPerfAccumulate("a_miss", a_sdm_miss)
+  XSPerfAccumulate("b_miss", b_sdm_miss)
+}
+
+class DRRIP(debug_mode: Boolean = false)(implicit p: Parameters) extends DCacheModule {
+  val n_ways = cacheParams.nWays
+  val n_sets = cacheParams.nSets
+  val dedicated_sets_num = 16
+  val state_bits = n_ways - 1
+  val psel_bits = 10
+  val bipcnt_bits = 5
+  val pselInit = ((1 << (psel_bits - 1)) - 1).U(psel_bits.W)
+  val pselMax = ~(0.U(psel_bits.W))
+
+  val in = IO(Input(new Bundle {
+    val lduAccess = Vec(LoadPipelineWidth, ValidIO(new LduAccess))
+    val mpAccess = ValidIO(new MPAccess)
+    val replReq = ValidIO(new ReplReq)
+  }))
+
+  val out = IO(Output(new Bundle{
+    val replResp = new ReplResp
+  }))
+
+  // for unit test
+  val debug = if (debug_mode) Some(IO(new Bundle {
+    val w = Flipped(new Bundle {
+      val psel = Valid(UInt(psel_bits.W))
+      val bip_cnt = Valid(UInt(bipcnt_bits.W))
+      val state = Valid(new Bundle {
+        val set = UInt(idxBits.W)
+        val value = UInt(state_bits.W)
+      })
+    })
+    val r = new Bundle {
+      val psel = UInt(psel_bits.W)
+      val bip_cnt = UInt(bipcnt_bits.W)
+      val state = new Bundle {
+        val set = Input(UInt(idxBits.W))
+        val value = UInt(state_bits.W)
+      }
+    }
+  })) else None
+
+  val state_vec = if (state_bits == 0) Reg(Vec(n_sets, UInt(0.W))) else RegInit(VecInit(Seq.fill(n_sets)(0.U(state_bits.W))))
+  val bip_cnt = RegInit(0.U(bipcnt_bits.W))
+  val psel = RegInit(pselInit)
+
+  def get_next_state(state: UInt, touch_way: UInt, is_repl: Bool, insert_mode: UInt, tree_nways: Int, is_mainpipe: Option[Boolean]): UInt = {
+        val State  = Wire(Vec(n_ways, UInt(2.W)))
+    val nextState  = Wire(Vec(n_ways, UInt(2.W)))
+    State.zipWithIndex.map { case (e, i) =>
+      e := state(2*i+1,2*i)
+    }
+    // hit-Promotion, miss-Insertion & Aging
+    val increcement = 3.U(2.W) - State(touch_way)
+    // req_type[3]: 0-firstuse, 1-reuse; req_type[2]: 0-acquire, 1-release;
+    // req_type[1]: 0-non-prefetch, 1-prefetch; req_type[0]: 0-not-refill, 1-refill
+    // rrpv: non-pref_hit/non-pref_refill(miss)/non-pref_release_reuse = 0;
+    // pref_hit do nothing; pref_refill = 1; non-pref_release_firstuse/pref_release = 2;
+    nextState.zipWithIndex.map { case (e, i) =>
+      e := Mux(i.U === touch_way,
+        // for touch_way
+        insert_mode,
+        // for other ways
+        is_mainpipe match {
+          case Some(true) => Mux(is_repl, State(i)+increcement, State(i))
+          case None | Some(false) => State(i)
+        } 
+      )
+    }
+    Cat(nextState.map(x=>x).reverse)
+  }
+
+  def get_next_state(state: UInt, touch_way: UInt, is_repl: Bool, insert_mode: UInt, is_mainpipe: Option[Boolean] = None): UInt = {
+    val touch_way_sized = if (touch_way.getWidth < log2Ceil(n_ways)) touch_way.padTo  (log2Ceil(n_ways))
+                                                                else touch_way.extract(log2Ceil(n_ways)-1,0)
+    get_next_state(state, touch_way_sized, is_repl, insert_mode, n_ways, is_mainpipe)
+  }
+
+  def get_next_state(state: UInt, valids: Seq[Bool], touch_ways: Seq[UInt], is_repls:Seq[Bool], insert_modes: Seq[UInt], is_mainpipes: Seq[Option[Boolean]]): UInt = {
+    (valids zip touch_ways zip is_repls zip insert_modes zip is_mainpipes).foldLeft(state) {
+      case(prev, ((((valid, touch_way), is_repl), insert_mode), is_mainpipe)) =>
+        Mux(valid, get_next_state(prev, touch_way, is_repl, insert_mode, is_mainpipe), prev)
+    }
+  }
+
+  def get_replace_way(state: UInt, tree_nways: Int): UInt = {
+    val RRPVVec = Wire(Vec(n_ways, UInt(2.W)))
+    RRPVVec.zipWithIndex.map { case (e, i) =>
+        e := state(2*i+1,2*i)
+    }
+    // scan each way's rrpv, find the least re-referenced way
+    val lrrWayVec = Wire(Vec(n_ways,Bool()))
+    lrrWayVec.zipWithIndex.map { case (e, i) =>
+      val isLarger = Wire(Vec(n_ways,Bool()))
+      for (j <- 0 until n_ways) {
+        isLarger(j) := RRPVVec(j) > RRPVVec(i)
+      }
+      e := !(isLarger.contains(true.B))
+    }
+    PriorityEncoder(lrrWayVec)
+  }
+
+  def get_replace_way(state: UInt): UInt = get_replace_way(state, n_ways)
+
+  def match_a(set: UInt) = {
+    val set_bits = set.getWidth
+    val dedicated_set_bits = log2Ceil(dedicated_sets_num)
+    require((set_bits - dedicated_set_bits) > (dedicated_set_bits - 1), s"$set_bits, $dedicated_set_bits")
+    set(set_bits - 1, set_bits - dedicated_set_bits) === set(dedicated_set_bits - 1, 0)
+  }
+
+  def match_b(set: UInt) = {
+    val set_bits = set.getWidth
+    val dedicated_set_bits = log2Ceil(dedicated_sets_num)
+    require((set_bits - dedicated_set_bits) > (dedicated_set_bits - 1))
+    set(set_bits - 1, set_bits - dedicated_set_bits) === ~(set(dedicated_set_bits - 1, 0))
+  }
+
+  def follower(set: UInt) = {
+    !match_a(set) && !match_b(set)
+  }
+
+  def use_a = !psel(psel_bits - 1)
+  def use_b = psel(psel_bits - 1)
+
+  // hit: insert mru
+  // miss: update psel
+  // repl: insert lru or mru
+  state_vec.zipWithIndex.foreach {
+    case (state, setidx) =>
+      val set = setidx.U(idxBits.W)
+      val updateState = in.lduAccess.map(a => a.valid && a.bits.set === set).asUInt.orR || in.mpAccess.valid && in.mpAccess.bits.set === set
+      val touchWaysSeq = in.lduAccess.map {a =>
+        val valid = a.valid && a.bits.hit && (a.bits.softPft || a.bits.nonPft) && a.bits.set === set
+        val touchWay = a.bits.way
+        val isRepl = false.B
+        val insertMode = 0.U
+        (valid, touchWay, isRepl, insertMode, Some(false))
+      } ++ Seq {
+        val mpAccess = in.mpAccess.bits
+        val valid = in.mpAccess.valid && in.mpAccess.bits.set === set && (mpAccess.isRepl || mpAccess.isHit)
+        val touchWay = in.mpAccess.bits.way
+        val isRepl = mpAccess.isRepl
+        val insertMode = Mux1H(Seq(
+          mpAccess.isHit -> 0.U,
+          (mpAccess.isRepl && (mpAccess.nonPft || mpAccess.softPft) && 
+            (match_a(mpAccess.set) || (follower(mpAccess.set) && use_a) || (match_b(mpAccess.set) || follower(mpAccess.set) && use_b) && bip_cnt === 0.U)) -> 1.U,
+          (mpAccess.isRepl && mpAccess.hwPft && bip_cnt =/= 0.U &&
+            (match_a(mpAccess.set) || (follower(mpAccess.set) && use_a) || (match_b(mpAccess.set) || follower(mpAccess.set) && use_b) && bip_cnt === 0.U)) -> 2.U,
+          (mpAccess.isRepl && (match_b(mpAccess.set) || follower(mpAccess.set) && use_b) && bip_cnt =/= 0.U) -> 3.U
+        ))
+        (valid, touchWay, isRepl, insertMode, Some(true))
+      }
+      when (updateState) {
+        state := get_next_state(state, touchWaysSeq.map(_._1), touchWaysSeq.map(_._2), touchWaysSeq.map(_._3), touchWaysSeq.map(_._4), touchWaysSeq.map(_._5))
       }
   }
 
